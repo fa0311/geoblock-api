@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -196,6 +197,43 @@ func (p *CachePersist) flushIfDirty() {
 
 	atomic.StoreUint32(&p.cacheDirty, 0)
 	p.lastFlush.Store(time.Now().UnixNano())
+}
+
+// sharedCacheEntry holds the process-wide cache and persistence controller for a
+// single middleware instance.
+type sharedCacheEntry struct {
+	cache   *lru.LRUCache
+	persist *CachePersist
+}
+
+var (
+	sharedCachesMu sync.Mutex
+	sharedCaches   = map[string]*sharedCacheEntry{}
+)
+
+// GetOrInitCache returns a process-wide cache/persistence pair keyed by name,
+// initializing it once on first use. Traefik instantiates the middleware many
+// times (per router/entry point and on every config reload), and each instance
+// would otherwise get its own isolated in-memory cache. That breaks self-register:
+// a write would land in one instance's cache and stay invisible to the instances
+// that actually serve requests. Sharing also avoids N persistence workers racing
+// to write the same file. The persistence worker runs under a detached context so
+// it survives teardown of any single instance (e.g. on config reload).
+func GetOrInitCache(key string, opt Options) (*lru.LRUCache, *CachePersist, error) {
+	sharedCachesMu.Lock()
+	defer sharedCachesMu.Unlock()
+
+	if sc, ok := sharedCaches[key]; ok {
+		return sc.cache, sc.persist, nil
+	}
+
+	cache, persist, err := InitializeCache(context.Background(), opt)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	sharedCaches[key] = &sharedCacheEntry{cache: cache, persist: persist}
+	return cache, persist, nil
 }
 
 func InitializeCache(ctx context.Context, opt Options) (*lru.LRUCache, *CachePersist, error) {

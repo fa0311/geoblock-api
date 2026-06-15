@@ -166,7 +166,10 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 		SilentStartUp:   config.SilentStartUp,
 		Name:            name,
 	}
-	cache, ipDB, err := InitializeCache(ctx, cacheOptions)
+	// Share one cache + persistence worker across all instances of this middleware
+	// name. Traefik builds the middleware many times, so a per-instance cache would
+	// make self-register writes invisible to the instances that serve requests.
+	cache, ipDB, err := GetOrInitCache(name, cacheOptions)
 	if err != nil {
 		infoLogger.Fatal(err)
 	}
