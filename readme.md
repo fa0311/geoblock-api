@@ -26,7 +26,7 @@ Simple plugin for [Traefik](https://github.com/containous/traefik) to block or a
 > `github.com/PascalMinder/geoblock` — read that as the module name above.
 >
 > **What this fork adds:** a `selfRegisterAddr` option. When set, the plugin
-> serves `GET /api/{country}` on that address and whitelists the **caller's own
+> serves `GET /api/geoblock/{country}` on that address and whitelists the **caller's own
 > IP** under that country in the live cache, effective immediately — handy for
 > granting yourself access from a normally-blocked country while travelling. It
 > has no auth of its own, so keep the port private. Empty (the default) disables
@@ -38,7 +38,7 @@ Simple plugin for [Traefik](https://github.com/containous/traefik) to block or a
 > ```
 >
 > ```console
-> curl "http://traefik:8888/api/JP" # whitelist my current IP as JP
+> curl "http://traefik:8888/api/geoblock/JP" # whitelist my current IP as JP
 > ```
 
 ## Configuration

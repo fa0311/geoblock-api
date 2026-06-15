@@ -260,7 +260,7 @@ func (a *GeoBlock) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 // when ctx is cancelled.
 func (a *GeoBlock) startSelfRegisterServer(ctx context.Context, addr string) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/{country}", a.handleSelfRegister)
+	mux.HandleFunc("/api/geoblock/{country}", a.handleSelfRegister)
 
 	srv := &http.Server{
 		Addr:              addr,
@@ -279,11 +279,11 @@ func (a *GeoBlock) startSelfRegisterServer(ctx context.Context, addr string) {
 		_ = srv.Shutdown(context.Background())
 	}()
 
-	a.infoLogger.Printf("%s: self-register endpoint listening on %s (GET /api/{country})", a.name, addr)
+	a.infoLogger.Printf("%s: self-register endpoint listening on %s (GET /api/geoblock/{country})", a.name, addr)
 }
 
 // handleSelfRegister adds the requesting client's IP address to the in-memory IP
-// database under the country code taken from the request path ("/api/{country}"),
+// database under the country code taken from the request path ("/api/geoblock/{country}"),
 // so subsequent requests from that IP pass the geo check immediately (and are
 // persisted when ipDatabaseCachePath is configured). The client IP is taken from
 // the request itself, so no IP needs to be supplied by the caller.
