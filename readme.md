@@ -4,14 +4,22 @@ Simple plugin for [Traefik](https://github.com/containous/traefik) to block or a
 
 > **🔧 This is a fork**
 >
-> Published as `github.com/fa0311/geoblock-api`. Install it with:
+> Module name: `github.com/fa0311/geoblock-api`. This fork is **not** on the
+> Traefik plugin catalog, so install it as a **local plugin** — mount the source
+> into the container and register it under `localPlugins` (no `version`):
 >
 > ```yaml
+> # static config (traefik.yml)
 > experimental:
->   plugins:
+>   localPlugins:
 >     geoblock:
->       moduleName: "github.com/fa0311/geoblock-api"
->       version: "build-b0bf58a"
+>       moduleName: github.com/fa0311/geoblock-api
+> ```
+>
+> ```yaml
+> # docker-compose.yml — mount path must match the module name exactly
+> volumes:
+>   - /path/to/geoblock-api:/plugins-local/src/github.com/fa0311/geoblock-api
 > ```
 >
 > The rest of this README is upstream's, so its examples still say
