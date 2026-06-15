@@ -1,7 +1,7 @@
 displayName: GeoBlock
 type: middleware
 
-import: github.com/PascalMinder/geoblock
+import: github.com/fa0311/geoblock-api
 
 summary: "block request based on their country of origin"
 

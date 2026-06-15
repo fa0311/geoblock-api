@@ -2,14 +2,27 @@
 
 Simple plugin for [Traefik](https://github.com/containous/traefik) to block or allow requests based on their country of origin. Uses [GeoJs.io](https://www.geojs.io/).
 
-> **🔧 Fork notice — self-register endpoint**
+> **🔧 This is a fork**
 >
-> This fork adds one config option, `selfRegisterAddr`. When set, the plugin runs
-> a small HTTP server on that address exposing `GET /api/{country}`, which
-> whitelists the **caller's own IP** under that country in the live cache (takes
-> effect immediately). Handy to grant yourself access from a normally-blocked
-> country while traveling. It has no auth of its own — keep the port private.
-> Empty (default) disables it.
+> Published as `github.com/fa0311/geoblock-api`. Install it with:
+>
+> ```yaml
+> experimental:
+>   plugins:
+>     geoblock:
+>       moduleName: "github.com/fa0311/geoblock-api"
+>       version: "build-b0bf58a"
+> ```
+>
+> The rest of this README is upstream's, so its examples still say
+> `github.com/PascalMinder/geoblock` — read that as the module name above.
+>
+> **What this fork adds:** a `selfRegisterAddr` option. When set, the plugin
+> serves `GET /api/{country}` on that address and whitelists the **caller's own
+> IP** under that country in the live cache, effective immediately — handy for
+> granting yourself access from a normally-blocked country while travelling. It
+> has no auth of its own, so keep the port private. Empty (the default) disables
+> it.
 >
 > ```yaml
 > countries: [JP]

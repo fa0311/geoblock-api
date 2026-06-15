@@ -4,7 +4,7 @@ log:
 experimental:
   localPlugins:
     geoblock:
-      moduleName: github.com/PascalMinder/geoblock
+      moduleName: github.com/fa0311/geoblock-api
 
 # API and dashboard configuration
 api:
