@@ -12,6 +12,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	lru "github.com/fa0311/geoblock-api/lrucache"
@@ -251,6 +252,12 @@ func (a *GeoBlock) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	a.next.ServeHTTP(rw, req)
 }
 
+// selfRegisterServers guards against binding the same self-register address more
+// than once. Traefik instantiates the middleware multiple times (e.g. on each
+// provider reload), and every instance would otherwise try to bind the same port
+// and fail with "address already in use". We only start one server per address.
+var selfRegisterServers sync.Map // addr -> struct{}
+
 // startSelfRegisterServer launches a dedicated HTTP server on its own port that
 // whitelists the requesting client's IP address at runtime. It is intentionally
 // separate from the Traefik request path (ServeHTTP) and shares the same
@@ -259,6 +266,11 @@ func (a *GeoBlock) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 // separate mechanism (firewall, reverse-proxy basic auth, ...). It shuts down
 // when ctx is cancelled.
 func (a *GeoBlock) startSelfRegisterServer(ctx context.Context, addr string) {
+	if _, loaded := selfRegisterServers.LoadOrStore(addr, struct{}{}); loaded {
+		a.infoLogger.Printf("%s: self-register endpoint already running on %s, skipping", a.name, addr)
+		return
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/geoblock/{country}", a.handleSelfRegister)
 
@@ -277,6 +289,7 @@ func (a *GeoBlock) startSelfRegisterServer(ctx context.Context, addr string) {
 	go func() {
 		<-ctx.Done()
 		_ = srv.Shutdown(context.Background())
+		selfRegisterServers.Delete(addr)
 	}()
 
 	a.infoLogger.Printf("%s: self-register endpoint listening on %s (GET /api/geoblock/{country})", a.name, addr)
