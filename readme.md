@@ -2,6 +2,24 @@
 
 Simple plugin for [Traefik](https://github.com/containous/traefik) to block or allow requests based on their country of origin. Uses [GeoJs.io](https://www.geojs.io/).
 
+> **🔧 Fork notice — self-register endpoint**
+>
+> This fork adds one config option, `selfRegisterAddr`. When set, the plugin runs
+> a small HTTP server on that address exposing `GET /api/{country}`, which
+> whitelists the **caller's own IP** under that country in the live cache (takes
+> effect immediately). Handy to grant yourself access from a normally-blocked
+> country while traveling. It has no auth of its own — keep the port private.
+> Empty (default) disables it.
+>
+> ```yaml
+> countries: [JP]
+> selfRegisterAddr: ":8888" # disabled when empty
+> ```
+>
+> ```console
+> curl "http://traefik:8888/api/JP" # whitelist my current IP as JP
+> ```
+
 ## Configuration
 
 It is possible to install the [plugin locally](https://traefik.io/blog/using-private-plugins-in-traefik-proxy-2-5/) or to install it through [Traefik Pilot](https://pilot.traefik.io/plugins).

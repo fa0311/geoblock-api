@@ -26,6 +26,7 @@ const (
 	countryCodeLength                  = 2
 	defaultDeniedRequestHTTPStatusCode = 403
 	defaultCacheWriteCycle             = 15
+	selfRegisterReadHeaderTimeout      = 5 * time.Second
 )
 
 // Config the plugin configuration.
@@ -54,6 +55,7 @@ type Config struct {
 	ExcludedPathPatterns         []string `yaml:"excludedPathPatterns,omitempty"`
 	LogFilePath                  string   `yaml:"logFilePath"`
 	IPDatabaseCachePath          string   `yaml:"ipDatabaseCachePath"`
+	SelfRegisterAddr             string   `yaml:"selfRegisterAddr"`
 }
 
 type ipEntry struct {
@@ -168,7 +170,7 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 		infoLogger.Fatal(err)
 	}
 
-	return &GeoBlock{
+	geoBlock := &GeoBlock{
 		next:                         next,
 		silentStartUp:                config.SilentStartUp,
 		allowLocalRequests:           config.AllowLocalRequests,
@@ -198,7 +200,15 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 		name:                         name,
 		infoLogger:                   infoLogger,
 		ipDatabasePersistence:        ipDB, // may be nil => feature OFF
-	}, nil
+	}
+
+	// optionally expose a dedicated self-register HTTP endpoint on its own port,
+	// kept separate from the Traefik request path. Disabled when no address set.
+	if config.SelfRegisterAddr != "" {
+		geoBlock.startSelfRegisterServer(ctx, config.SelfRegisterAddr)
+	}
+
+	return geoBlock, nil
 }
 
 func (a *GeoBlock) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
@@ -239,6 +249,85 @@ func (a *GeoBlock) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	}
 
 	a.next.ServeHTTP(rw, req)
+}
+
+// startSelfRegisterServer launches a dedicated HTTP server on its own port that
+// whitelists the requesting client's IP address at runtime. It is intentionally
+// separate from the Traefik request path (ServeHTTP) and shares the same
+// in-memory IP database so registrations take effect immediately. The endpoint
+// performs no authentication of its own and is expected to be protected by a
+// separate mechanism (firewall, reverse-proxy basic auth, ...). It shuts down
+// when ctx is cancelled.
+func (a *GeoBlock) startSelfRegisterServer(ctx context.Context, addr string) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/{country}", a.handleSelfRegister)
+
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: selfRegisterReadHeaderTimeout,
+	}
+
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			a.infoLogger.Printf("%s: self-register server stopped: %s", a.name, err)
+		}
+	}()
+
+	go func() {
+		<-ctx.Done()
+		_ = srv.Shutdown(context.Background())
+	}()
+
+	a.infoLogger.Printf("%s: self-register endpoint listening on %s (GET /api/{country})", a.name, addr)
+}
+
+// handleSelfRegister adds the requesting client's IP address to the in-memory IP
+// database under the country code taken from the request path ("/api/{country}"),
+// so subsequent requests from that IP pass the geo check immediately (and are
+// persisted when ipDatabaseCachePath is configured). The client IP is taken from
+// the request itself, so no IP needs to be supplied by the caller.
+func (a *GeoBlock) handleSelfRegister(rw http.ResponseWriter, req *http.Request) {
+	country := req.PathValue("country")
+	if country == "" {
+		rw.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	ipString := requestClientIP(req)
+	ipAddress := net.ParseIP(ipString)
+	if ipAddress == nil {
+		a.infoLogger.Printf("%s: self-register received invalid IP address [%s]", a.name, ipString)
+		rw.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	a.database.Add(ipAddress.String(), ipEntry{Country: country, Timestamp: time.Now()})
+	a.ipDatabasePersistence.MarkDirty()
+	a.infoLogger.Printf("%s: IP address [%s] self-registered with country [%s]", a.name, ipAddress, country)
+
+	rw.WriteHeader(http.StatusOK)
+}
+
+// requestClientIP extracts the client IP address from the request, preferring
+// the X-Forwarded-For / X-Real-IP headers (set by a fronting proxy) and falling
+// back to the connection's remote address.
+func requestClientIP(req *http.Request) string {
+	if forwardedFor := req.Header.Get(xForwardedFor); forwardedFor != "" {
+		parts := strings.Split(forwardedFor, ",")
+		return strings.TrimSpace(parts[0])
+	}
+
+	if realIP := req.Header.Get(xRealIP); realIP != "" {
+		return strings.TrimSpace(realIP)
+	}
+
+	host, _, err := net.SplitHostPort(req.RemoteAddr)
+	if err != nil {
+		return req.RemoteAddr
+	}
+
+	return host
 }
 
 func (a *GeoBlock) isPathExcluded(path string) bool {
