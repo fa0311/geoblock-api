@@ -28,13 +28,17 @@ Simple plugin for [Traefik](https://github.com/containous/traefik) to block or a
 ### Self-register endpoint (fork addition)
 
 `selfRegisterURL` (empty = off) whitelists the **caller's own IP** under the
-country code at the tail of the matched path (`/api/geoblock/JP` → `JP`),
-effective immediately and persisted when `ipDatabaseCachePath` is set.
+country code at the tail of the matched path on `POST` (`/api/geoblock/JP` →
+`JP`), effective immediately and persisted when `ipDatabaseCachePath` is set.
+
+`GET` on the bare prefix (`/api/geoblock/`) returns the **caller's own** cached
+entry as JSON instead — its country and `ttlSeconds` (countdown to the monthly
+refresh, only enforced when `forceMonthlyUpdate` is set) — or `404` if not cached.
 
 - Runs before the geo check — a blocked client can still reach it.
-- **No auth**; protecting it upstream is out of scope.
+- **No auth**, and `POST` lets a caller whitelist themselves, so protect it upstream — out of scope here.
 - Answers `200` itself (never proxied) → route to `noop@internal`.
-- A `PathRegexp` rule keeps malformed codes out.
+- A `PathRegexp` rule keeps malformed codes out; the plugin gates the verbs.
 
 ```yaml
 # dynamic configuration (Traefik v3)
@@ -50,14 +54,15 @@ http:
 
   routers:
     geoblock-register:
-      rule: "Host(`example.com`) && PathRegexp(`^/api/geoblock/[A-Z]{2}$`)"
+      rule: "Host(`example.com`) && PathRegexp(`^/api/geoblock/([A-Z]{2})?$`)"
       service: noop@internal
       middlewares:
         - geoblock
 ```
 
 ```console
-curl "http://example.com/api/geoblock/JP"   # whitelist my current IP as JP
+curl -X POST "http://example.com/api/geoblock/JP"   # whitelist my current IP as JP
+curl "http://example.com/api/geoblock/"             # my own cache entry (country + TTL)
 ```
 
 ## Configuration

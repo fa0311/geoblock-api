@@ -1,6 +1,7 @@
 package geoblock
 
 import (
+	"encoding/json"
 	"net"
 	"net/http"
 	"net/url"
@@ -37,15 +38,20 @@ func newSelfRegister(rawURL string) (*selfRegister, error) {
 	return &selfRegister{host: u.Hostname(), pathPrefix: u.Path}, nil
 }
 
-// match reports whether the request targets the self-register endpoint and, if
-// so, returns the country code (the path remainder after the configured prefix).
-// Host comparison ignores case and port; the path must start with the prefix.
-func (s *selfRegister) match(req *http.Request) (string, bool) {
+// hostMatches reports whether the request targets the configured host, ignoring
+// case and an optional port.
+func (s *selfRegister) hostMatches(req *http.Request) bool {
 	host := req.Host
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h
 	}
-	if !strings.EqualFold(host, s.host) {
+	return strings.EqualFold(host, s.host)
+}
+
+// match reports whether the request is a register call (POST {prefix}{country})
+// and, if so, returns the country code (the path remainder after the prefix).
+func (s *selfRegister) match(req *http.Request) (string, bool) {
+	if req.Method != http.MethodPost || !s.hostMatches(req) {
 		return "", false
 	}
 
@@ -55,6 +61,12 @@ func (s *selfRegister) match(req *http.Request) (string, bool) {
 	}
 
 	return country, true
+}
+
+// queryRequested reports whether the request is a self-query call: GET on the
+// bare prefix (no country segment).
+func (s *selfRegister) queryRequested(req *http.Request) bool {
+	return req.Method == http.MethodGet && s.hostMatches(req) && req.URL.Path == s.pathPrefix
 }
 
 // handleSelfRegister adds the requesting client's IP address to the in-memory IP
@@ -71,9 +83,56 @@ func (a *GeoBlock) handleSelfRegister(rw http.ResponseWriter, req *http.Request,
 	}
 
 	ipAddress := ipAddresses[0]
-	a.database.Add(ipAddress.String(), ipEntry{Country: country, Timestamp: time.Now()})
+	entry := ipEntry{Country: country, Timestamp: time.Now()}
+	a.database.Add(ipAddress.String(), entry)
 	a.ipDatabasePersistence.MarkDirty()
 	a.infoLogger.Printf("%s: IP address [%s] self-registered with country [%s]", a.name, ipAddress, country)
 
-	rw.WriteHeader(http.StatusOK)
+	a.writeEntryJSON(rw, ipAddress.String(), entry)
+}
+
+// handleSelfQuery writes the caller's own cached entry as JSON: its country and
+// ttlSeconds (countdown to the monthly refresh, only enforced when
+// forceMonthlyUpdate is set, reported as ttlEnforced). It returns 404 when the
+// caller's IP is not cached. The client IP is taken via collectRemoteIP, the same
+// logic the geo check enforces, so a caller only ever sees their own entry.
+func (a *GeoBlock) handleSelfQuery(rw http.ResponseWriter, req *http.Request) {
+	ipAddresses, err := a.collectRemoteIP(req)
+	if err != nil || len(ipAddresses) == 0 {
+		a.infoLogger.Printf("%s: self-query could not determine client IP: %s", a.name, err)
+		rw.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	ipAddress := ipAddresses[0]
+	cached, ok := a.database.Get(ipAddress.String())
+	entry, typeOK := cached.(ipEntry)
+	if !ok || !typeOK {
+		rw.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	a.writeEntryJSON(rw, ipAddress.String(), entry)
+}
+
+// writeEntryJSON writes a single cache entry as JSON: its country and ttlSeconds
+// (countdown to the monthly refresh, only enforced when forceMonthlyUpdate is
+// set, reported as ttlEnforced). Shared by the register (POST) and query (GET)
+// responses.
+func (a *GeoBlock) writeEntryJSON(rw http.ResponseWriter, ip string, entry ipEntry) {
+	ttl := time.Duration(numberOfHoursInMonth) * time.Hour
+	rw.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(rw).Encode(struct {
+		IP          string `json:"ip"`
+		Country     string `json:"country"`
+		TTLSeconds  int64  `json:"ttlSeconds"`
+		TTLEnforced bool   `json:"ttlEnforced"`
+	}{
+		IP:          ip,
+		Country:     entry.Country,
+		TTLSeconds:  int64((ttl - time.Since(entry.Timestamp)).Seconds()),
+		TTLEnforced: a.forceMonthlyUpdate,
+	}); err != nil {
+		a.infoLogger.Printf("%s: response encode failed: %s", a.name, err)
+	}
 }

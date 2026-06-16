@@ -220,6 +220,10 @@ func (a *GeoBlock) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 			a.handleSelfRegister(rw, req, country)
 			return
 		}
+		if a.selfRegister.queryRequested(req) {
+			a.handleSelfQuery(rw, req)
+			return
+		}
 	}
 
 	fullURL := req.Host + req.URL.Path
