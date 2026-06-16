@@ -120,7 +120,7 @@ func (a *GeoBlock) handleSelfQuery(rw http.ResponseWriter, req *http.Request) {
 // set, reported as ttlEnforced). Shared by the register (POST) and query (GET)
 // responses.
 func (a *GeoBlock) writeEntryJSON(rw http.ResponseWriter, ip string, entry ipEntry) {
-	ttl := time.Duration(numberOfHoursInMonth) * time.Hour
+	ttl := a.cacheTTL
 	rw.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(rw).Encode(struct {
 		IP          string `json:"ip"`
