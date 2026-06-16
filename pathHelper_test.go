@@ -6,7 +6,7 @@ import (
 	"runtime"
 	"testing"
 
-	geoblock "github.com/PascalMinder/geoblock"
+	geoblock "github.com/fa0311/geoblock-api"
 )
 
 func TestValidatePersistencePath(t *testing.T) {

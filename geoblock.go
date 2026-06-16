@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	lru "github.com/PascalMinder/geoblock/lrucache"
+	lru "github.com/fa0311/geoblock-api/lrucache"
 )
 
 const (
@@ -54,6 +54,7 @@ type Config struct {
 	ExcludedPathPatterns         []string `yaml:"excludedPathPatterns,omitempty"`
 	LogFilePath                  string   `yaml:"logFilePath"`
 	IPDatabaseCachePath          string   `yaml:"ipDatabaseCachePath"`
+	SelfRegisterURL              string   `yaml:"selfRegisterURL"`
 }
 
 type ipEntry struct {
@@ -97,6 +98,7 @@ type GeoBlock struct {
 	name                         string
 	infoLogger                   *log.Logger
 	ipDatabasePersistence        *CachePersist
+	selfRegister                 *selfRegister // nil => self-register endpoint disabled
 }
 
 // New created a new GeoBlock plugin.
@@ -169,6 +171,13 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 		infoLogger.Fatal(err)
 	}
 
+	// optionally enable the self-register endpoint, matched inside ServeHTTP
+	// against this URL prefix. Disabled when SelfRegisterURL is empty.
+	selfReg, err := newSelfRegister(config.SelfRegisterURL)
+	if err != nil {
+		infoLogger.Fatal(err)
+	}
+
 	return &GeoBlock{
 		next:                         next,
 		silentStartUp:                config.SilentStartUp,
@@ -199,10 +208,20 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 		name:                         name,
 		infoLogger:                   infoLogger,
 		ipDatabasePersistence:        ipDB, // may be nil => feature OFF
+		selfRegister:                 selfReg,
 	}, nil
 }
 
 func (a *GeoBlock) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+	// self-register endpoint, handled before the geo check so a client currently
+	// blocked by country can still whitelist itself. Must be protected upstream.
+	if a.selfRegister != nil {
+		if country, ok := a.selfRegister.match(req); ok {
+			a.handleSelfRegister(rw, req, country)
+			return
+		}
+	}
+
 	fullURL := req.Host + req.URL.Path
 	if a.isPathExcluded(fullURL) {
 		if a.logAllowedRequests {

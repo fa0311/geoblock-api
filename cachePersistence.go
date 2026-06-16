@@ -11,7 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	lru "github.com/PascalMinder/geoblock/lrucache"
+	lru "github.com/fa0311/geoblock-api/lrucache"
 )
 
 const (

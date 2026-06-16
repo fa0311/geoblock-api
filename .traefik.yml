@@ -1,7 +1,11 @@
 displayName: GeoBlock
 type: middleware
 
-import: github.com/PascalMinder/geoblock
+import: github.com/fa0311/geoblock-api
+
+# the Go package is `package geoblock`, but the module's last path segment is
+# `geoblock-api`; basePkg tells Traefik the real package name to call New on.
+basePkg: geoblock
 
 summary: "block request based on their country of origin"
 

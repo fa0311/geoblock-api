@@ -1,0 +1,40 @@
+name: Release
+
+# Fire a release whenever code lands on the add-api branch.
+on:
+  push:
+    branches:
+      - add-api
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Tag and Release
+    runs-on: ubuntu-latest
+    steps:
+      # https://github.com/marketplace/actions/checkout
+      - name: Check out code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Cut a tag named after the commit hash and push it.
+      - name: Create tag from commit hash
+        id: tag
+        run: |
+          TAG="build-${GITHUB_SHA::7}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          git tag "${TAG}"
+          git push origin "${TAG}"
+
+      # https://github.com/marketplace/actions/gh-release
+      # Uploads the source archive of the tag as a GitHub release.
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true

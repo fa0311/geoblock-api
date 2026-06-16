@@ -2,6 +2,64 @@
 
 Simple plugin for [Traefik](https://github.com/containous/traefik) to block or allow requests based on their country of origin. Uses [GeoJs.io](https://www.geojs.io/).
 
+> **🔧 This is a fork** — module name `github.com/fa0311/geoblock-api`.
+>
+> It is **not** on the Traefik plugin catalog, so install it as a **local
+> plugin**: mount the source into the container and register it under
+> `localPlugins` (no `version`). The mount path must match the module name.
+>
+> ```yaml
+> # static config (traefik.yml)
+> experimental:
+>   localPlugins:
+>     geoblock:
+>       moduleName: github.com/fa0311/geoblock-api
+> ```
+>
+> ```yaml
+> # docker-compose.yml
+> volumes:
+>   - /path/to/geoblock-api:/plugins-local/src/github.com/fa0311/geoblock-api
+> ```
+>
+> Upstream's examples below still say `github.com/PascalMinder/geoblock` — read
+> that as the module name above.
+
+### Self-register endpoint (fork addition)
+
+`selfRegisterURL` (empty = off) whitelists the **caller's own IP** under the
+country code at the tail of the matched path (`/api/geoblock/JP` → `JP`),
+effective immediately and persisted when `ipDatabaseCachePath` is set.
+
+- Runs before the geo check — a blocked client can still reach it.
+- **No auth**; protecting it upstream is out of scope.
+- Answers `200` itself (never proxied) → route to `noop@internal`.
+- A `PathRegexp` rule keeps malformed codes out.
+
+```yaml
+# dynamic configuration (Traefik v3)
+http:
+  middlewares:
+    geoblock:
+      plugin:
+        geoblock:
+          countries:
+            - JP
+          # ...other geoblock options...
+          selfRegisterURL: "http://example.com/api/geoblock/"
+
+  routers:
+    geoblock-register:
+      rule: "Host(`example.com`) && PathRegexp(`^/api/geoblock/[A-Z]{2}$`)"
+      service: noop@internal
+      middlewares:
+        - geoblock
+```
+
+```console
+curl "http://example.com/api/geoblock/JP"   # whitelist my current IP as JP
+```
+
 ## Configuration
 
 It is possible to install the [plugin locally](https://traefik.io/blog/using-private-plugins-in-traefik-proxy-2-5/) or to install it through [Traefik Pilot](https://pilot.traefik.io/plugins).
