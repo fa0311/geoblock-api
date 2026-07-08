@@ -21,7 +21,7 @@ const (
 	xForwardedFor                      = "X-Forwarded-For"
 	xRealIP                            = "X-Real-IP"
 	countryHeader                      = "X-IPCountry"
-	defaultCacheTTLSeconds             = 30 * 24 * 60 * 60 // 30 days
+	defaultCacheTTL                    = 30 * 24 * time.Hour // legacy forceMonthlyUpdate interval
 	unknownCountryCode                 = "AA"
 	countryCodeLength                  = 2
 	defaultDeniedRequestHTTPStatusCode = 403
@@ -106,85 +106,117 @@ type GeoBlock struct {
 // New created a new GeoBlock plugin.
 func New(ctx context.Context, next http.Handler, config *Config, name string) (http.Handler, error) {
 	gob.Register(ipEntry{})
+	infoLogger := buildLogger()
 
-	infoLogger := log.New(io.Discard, "INFO: GeoBlock: ", log.Ldate|log.Ltime)
-
-	// check geolocation API uri
-	if len(config.API) == 0 || !strings.Contains(config.API, "{ip}") {
-		return nil, fmt.Errorf("no api uri given")
-	}
-
-	// check if at least one allowed country is provided
-	if len(config.Countries) == 0 {
-		return nil, fmt.Errorf("no allowed country code provided")
-	}
-
-	// set default API timeout if non is given
-	if config.APITimeoutMs == 0 {
-		config.APITimeoutMs = 750
-	}
-
-	// set default cache entry TTL (in seconds) if non is given
-	if config.CacheTTLSeconds == 0 {
-		config.CacheTTLSeconds = defaultCacheTTLSeconds
-	}
-
-	// set default HTTP status code for denied requests if non other is supplied
-	deniedRequestHTTPStatusCode, err := getHTTPStatusCodeDeniedRequest(config.HTTPStatusCodeDeniedRequest)
-	if err != nil {
+	if err := validateConfig(config); err != nil {
 		return nil, err
 	}
-	config.HTTPStatusCodeDeniedRequest = deniedRequestHTTPStatusCode
 
-	// build allowed IP and IP ranges lists
+	if err := applyDefaults(config); err != nil {
+		return nil, err
+	}
+
 	allowedIPAddresses, allowedIPRanges := parseAllowedIPAddresses(config.AllowedIPAddresses, infoLogger)
 
-	// compile excluded path regex patterns
 	excludedPathRegexps, err := compileExcludedPathPatterns(config.ExcludedPathPatterns)
 	if err != nil {
 		return nil, err
 	}
 
 	infoLogger.SetOutput(os.Stdout)
-
-	// output configuration of the middleware instance
 	if !config.SilentStartUp {
 		infoLogger.Printf("%s: Starting middleware", name)
 		printConfiguration(name, config, infoLogger)
 	}
 
-	// create custom log target if needed
-	var logFile *os.File
-	if len(config.LogFilePath) > 0 {
-		logTarget, err := CreateCustomLogTarget(ctx, infoLogger, name, config.LogFilePath)
-		if err != nil {
-			infoLogger.Fatal(err)
-		}
-		logFile = logTarget
+	logFile, err := buildLogTarget(ctx, config, infoLogger, name)
+	if err != nil {
+		return nil, err
 	}
 
-	// initialize local IP lookup cache
+	cache, ipDB, err := buildCache(config, infoLogger, name)
+	if err != nil {
+		return nil, err
+	}
+
+	return withSelfRegister(
+		buildGeoBlock(
+			next, config, name, infoLogger, logFile, cache, ipDB,
+			allowedIPAddresses, allowedIPRanges, excludedPathRegexps,
+		),
+		config.SelfRegisterURL,
+	)
+}
+
+func validateConfig(config *Config) error {
+	if len(config.API) == 0 || !strings.Contains(config.API, "{ip}") {
+		return fmt.Errorf("no api uri given")
+	}
+
+	if len(config.Countries) == 0 {
+		return fmt.Errorf("no allowed country code provided")
+	}
+
+	return nil
+}
+
+func applyDefaults(config *Config) error {
+	if config.APITimeoutMs == 0 {
+		config.APITimeoutMs = 750
+	}
+
+	deniedRequestHTTPStatusCode, err := getHTTPStatusCodeDeniedRequest(config.HTTPStatusCodeDeniedRequest)
+	if err != nil {
+		return err
+	}
+	config.HTTPStatusCodeDeniedRequest = deniedRequestHTTPStatusCode
+
+	return nil
+}
+
+func buildLogger() *log.Logger {
+	return log.New(io.Discard, "INFO: GeoBlock: ", log.Ldate|log.Ltime)
+}
+
+func buildLogTarget(ctx context.Context, config *Config, logger *log.Logger, name string) (*os.File, error) {
+	if len(config.LogFilePath) == 0 {
+		return nil, nil
+	}
+
+	logTarget, err := CreateCustomLogTarget(ctx, logger, name, config.LogFilePath)
+	if err != nil {
+		return nil, err
+	}
+
+	return logTarget, nil
+}
+
+func buildCache(config *Config, logger *log.Logger, name string) (*lru.LRUCache, *CachePersist, error) {
 	cacheOptions := Options{
 		CacheSize:       config.CacheSize,
 		CachePath:       config.IPDatabaseCachePath,
 		PersistInterval: defaultCacheWriteCycle,
-		Logger:          infoLogger,
+		Logger:          logger,
 		SilentStartUp:   config.SilentStartUp,
 		Name:            name,
 	}
+
 	// Share one cache + persistence worker per middleware (see GetOrInitCache).
-	cache, ipDB, err := GetOrInitCache(cacheOptions)
-	if err != nil {
-		infoLogger.Fatal(err)
-	}
+	return GetOrInitCache(cacheOptions)
+}
 
-	// optionally enable the self-register endpoint, matched inside ServeHTTP
-	// against this URL prefix. Disabled when SelfRegisterURL is empty.
-	selfReg, err := newSelfRegister(config.SelfRegisterURL)
-	if err != nil {
-		infoLogger.Fatal(err)
-	}
-
+func buildGeoBlock(
+	next http.Handler,
+	config *Config,
+	name string,
+	logger *log.Logger,
+	logFile *os.File,
+	cache *lru.LRUCache,
+	ipDB *CachePersist,
+	allowedIPAddresses []net.IP,
+	allowedIPRanges []*net.IPNet,
+	excludedPathRegexps []*regexp.Regexp,
+) *GeoBlock {
 	return &GeoBlock{
 		next:                         next,
 		silentStartUp:                config.SilentStartUp,
@@ -214,10 +246,9 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 		redirectURLIfDenied:          config.RedirectURLIfDenied,
 		excludedPathRegexps:          excludedPathRegexps,
 		name:                         name,
-		infoLogger:                   infoLogger,
+		infoLogger:                   logger,
 		ipDatabasePersistence:        ipDB, // may be nil => feature OFF
-		selfRegister:                 selfReg,
-	}, nil
+	}
 }
 
 func (a *GeoBlock) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
@@ -249,6 +280,10 @@ func (a *GeoBlock) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		a.infoLogger.Printf("%s: %s", a.name, err)
 		rw.WriteHeader(http.StatusForbidden)
 		return
+	}
+
+	if a.logAllowedRequests {
+		a.infoLogger.Printf("%s: evaluating client IP(s) [%s] for [%s]", a.name, formatIPList(requestIPAddresses), fullURL)
 	}
 
 	// Only keep the first IP address (should be the client, if the proxy behaves itself)
@@ -283,21 +318,6 @@ func (a *GeoBlock) isPathExcluded(path string) bool {
 }
 
 func (a *GeoBlock) allowDenyIPAddress(requestIPAddr *net.IP, req *http.Request) bool {
-	// check if the request IP address is a local address and if those are allowed
-	if isPrivateIP(*requestIPAddr, a.privateIPRanges) {
-		if a.allowLocalRequests {
-			if a.logLocalRequests {
-				a.infoLogger.Printf("%s: request allowed [%s] since local IP addresses are allowed", a.name, requestIPAddr)
-			}
-			return true
-		}
-
-		if a.logLocalRequests {
-			a.infoLogger.Printf("%s: request denied [%s] since local IP addresses are denied", a.name, requestIPAddr)
-		}
-		return false
-	}
-
 	// check if the request IP address is explicitly allowed
 	if ipInSlice(*requestIPAddr, a.allowedIPAddresses) {
 		if a.addCountryHeader {
@@ -321,11 +341,27 @@ func (a *GeoBlock) allowDenyIPAddress(requestIPAddr *net.IP, req *http.Request) 
 					req.Header.Set(countryHeader, countryCode)
 				}
 			}
-			if a.logLocalRequests {
+			if a.logAllowedRequests {
 				a.infoLogger.Printf("%s: request allowed [%s] since the IP address is explicitly allowed", a.name, requestIPAddr)
 			}
 			return true
 		}
+	}
+
+	// check if the request IP address is a local address and if those are allowed
+	if isPrivateIP(*requestIPAddr, a.privateIPRanges) {
+		if a.allowLocalRequests {
+			if a.logLocalRequests {
+				a.infoLogger.Printf("%s: request allowed [%s] since local IP addresses are allowed", a.name, requestIPAddr)
+			}
+			return true
+		}
+
+		// Always surface local denials: this is the most common cause of an
+		// unexplained 403 (the evaluated IP is a proxy/private address), so the
+		// reason must be visible even when logLocalRequests is off.
+		a.infoLogger.Printf("%s: request denied [%s] since local IP addresses are denied", a.name, requestIPAddr)
+		return false
 	}
 
 	// check if the GeoIP database contains an entry for the request IP address
@@ -336,6 +372,24 @@ func (a *GeoBlock) allowDenyIPAddress(requestIPAddr *net.IP, req *http.Request) 
 	}
 
 	return allowed
+}
+
+// shouldRefreshEntry reports whether a cached entry has outlived its TTL and
+// must be re-fetched from the API.
+//
+// An explicit cacheTtlSeconds takes effect on its own. When it is unset (<= 0),
+// forceMonthlyUpdate preserves the legacy behavior of refreshing entries once
+// they are ~30 days old otherwise entries never expire by age.
+func (a *GeoBlock) shouldRefreshEntry(entry ipEntry) bool {
+	ttl := a.cacheTTL
+	if ttl <= 0 {
+		if !a.forceMonthlyUpdate {
+			return false
+		}
+		ttl = defaultCacheTTL
+	}
+
+	return time.Since(entry.Timestamp) >= ttl
 }
 
 func (a *GeoBlock) allowDenyCachedRequestIP(requestIPAddr *net.IP, req *http.Request) (bool, string) {
@@ -372,7 +426,7 @@ func (a *GeoBlock) allowDenyCachedRequestIP(requestIPAddr *net.IP, req *http.Req
 	}
 
 	// check if existing entry is older than the configured cache TTL, if so update the entry
-	if time.Since(entry.Timestamp) >= a.cacheTTL && a.forceMonthlyUpdate {
+	if a.shouldRefreshEntry(entry) {
 		entry, err = a.createNewIPEntry(req, ipAddressString)
 		if err != nil {
 			if a.ignoreAPIFailures {
@@ -384,7 +438,10 @@ func (a *GeoBlock) allowDenyCachedRequestIP(requestIPAddr *net.IP, req *http.Req
 		}
 	}
 
-	// check if we are in black/white-list mode and allow/deny based on country code
+	// check if we are in black/white-list mode and allow/deny based on country code.
+	// Note: allowUnknownCountries only has an effect in whitelist mode. In blacklist
+	// mode an unknown country is, by definition, not on the blocklist, so
+	// isCountryAllowed is already true and the allowUnknownCountries term is redundant.
 	isUnknownCountry := entry.Country == unknownCountryCode
 	isCountryAllowed := stringInSlice(entry.Country, a.countries) != a.blackListMode
 	isAllowed := isCountryAllowed || (isUnknownCountry && a.allowUnknownCountries)
@@ -443,7 +500,7 @@ func (a *GeoBlock) cachedRequestIP(requestIPAddr *net.IP, req *http.Request) (bo
 	}
 
 	// check if existing entry is older than the configured cache TTL, if so update the entry
-	if time.Since(entry.Timestamp) >= a.cacheTTL && a.forceMonthlyUpdate {
+	if a.shouldRefreshEntry(entry) {
 		entry, err = a.createNewIPEntry(req, ipAddressString)
 		if err != nil {
 			return false, ""
@@ -539,7 +596,9 @@ func (a *GeoBlock) callGeoJS(ipAddress string) (string, error) {
 	}
 
 	apiURI := strings.Replace(a.apiURI, "{ip}", ipAddress, 1)
-
+	if a.logAPIRequests {
+		a.infoLogger.Printf("%s: Sending request to %s", a.name, apiURI)
+	}
 	req, err := http.NewRequest(http.MethodGet, apiURI, nil)
 	if err != nil {
 		return "", err
@@ -603,6 +662,14 @@ func stringInSlice(a string, list []string) bool {
 	return false
 }
 
+func formatIPList(ips []*net.IP) string {
+	parts := make([]string, 0, len(ips))
+	for _, ip := range ips {
+		parts = append(parts, ip.String())
+	}
+	return strings.Join(parts, ", ")
+}
+
 func ipInSlice(a net.IP, list []net.IP) bool {
 	for _, b := range list {
 		if b.Equal(a) {
@@ -613,6 +680,13 @@ func ipInSlice(a net.IP, list []net.IP) bool {
 }
 
 func parseIP(addr string) (net.IP, error) {
+	// Strip an optional port, e.g. "10.10.10.10:23200" or "[2001:db8::1]:23200".
+	// net.SplitHostPort errors on a port-less address (both IPv4 and IPv6), in
+	// which case we keep the original string.
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		addr = host
+	}
+
 	ipAddress := net.ParseIP(addr)
 
 	if ipAddress == nil {

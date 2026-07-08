@@ -38,6 +38,15 @@ func newSelfRegister(rawURL string) (*selfRegister, error) {
 	return &selfRegister{host: u.Hostname(), pathPrefix: u.Path}, nil
 }
 
+func withSelfRegister(a *GeoBlock, rawURL string) (*GeoBlock, error) {
+	selfReg, err := newSelfRegister(rawURL)
+	if err != nil {
+		return nil, err
+	}
+	a.selfRegister = selfReg
+	return a, nil
+}
+
 // hostMatches reports whether the request targets the configured host, ignoring
 // case and an optional port.
 func (s *selfRegister) hostMatches(req *http.Request) bool {

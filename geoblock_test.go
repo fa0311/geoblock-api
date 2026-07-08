@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -248,6 +249,105 @@ func TestMultipleForwardedForIPwithSpaces(t *testing.T) {
 	if string(body) != expectedBody {
 		t.Fatalf("expected body %q, got %q", expectedBody, string(body))
 	}
+}
+
+func TestForwardedForIPWithPort(t *testing.T) {
+	// Some proxies (e.g. AWS with client port preservation) forward the client
+	// address as "ip:port". The port must be stripped before the lookup.
+	mockServer := createMockAPIServer(t, map[string][]byte{chExampleIP: []byte(`CH`)})
+	defer mockServer.Close()
+
+	cfg := createTesterConfig()
+	cfg.Countries = append(cfg.Countries, "CH")
+	cfg.API = mockServer.URL + "/{ip}"
+
+	ctx := context.Background()
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("Allowed request")) })
+
+	handler, err := geoblock.New(ctx, next, cfg, "GeoBlock")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req.Header.Add(xForwardedFor, chExampleIP+":23200")
+
+	handler.ServeHTTP(recorder, req)
+
+	assertStatusCode(t, recorder.Result(), http.StatusOK)
+}
+
+func TestForwardedForIPv6WithPort(t *testing.T) {
+	// Bracketed IPv6 with a port, e.g. "[2001:db8::1]:23200", must resolve to
+	// the bare IPv6 address for the lookup.
+	const ipv6 = "2001:db8::1"
+
+	mockServer := createMockAPIServer(t, map[string][]byte{ipv6: []byte(`CH`)})
+	defer mockServer.Close()
+
+	cfg := createTesterConfig()
+	cfg.Countries = append(cfg.Countries, "CH")
+	cfg.API = mockServer.URL + "/{ip}"
+
+	ctx := context.Background()
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("Allowed request")) })
+
+	handler, err := geoblock.New(ctx, next, cfg, "GeoBlock")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req.Header.Add(xForwardedFor, "["+ipv6+"]:23200")
+
+	handler.ServeHTTP(recorder, req)
+
+	assertStatusCode(t, recorder.Result(), http.StatusOK)
+}
+
+func TestReverseProxyForwardedForIPWithPort(t *testing.T) {
+	// Reverse-proxy mode uses only the first X-Forwarded-For IP; it too must
+	// tolerate a trailing port.
+	mockServer := createMockAPIServer(t, map[string][]byte{chExampleIP: []byte(`CH`)})
+	defer mockServer.Close()
+
+	cfg := createTesterConfig()
+	cfg.Countries = append(cfg.Countries, "CH")
+	cfg.API = mockServer.URL + "/{ip}"
+	cfg.XForwardedForReverseProxy = true
+
+	ctx := context.Background()
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("Allowed request")) })
+
+	handler, err := geoblock.New(ctx, next, cfg, "GeoBlock")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req.Header.Add(xForwardedFor, chExampleIP+":23200")
+
+	handler.ServeHTTP(recorder, req)
+
+	assertStatusCode(t, recorder.Result(), http.StatusOK)
 }
 
 func createMockAPIServer(t *testing.T, ipResponseMap map[string][]byte) *httptest.Server {
@@ -1237,6 +1337,53 @@ func TestLogDeniedDueToHeaderError_FirstCall(t *testing.T) {
 	}
 }
 
+func TestDeniedLocalRequestIsLogged(t *testing.T) {
+	// A denied local/private IP must log a reason even when logLocalRequests is
+	// off, otherwise the request is silently 403'd with nothing to trace (see #85).
+	tempDir, err := os.MkdirTemp("", "logtest")
+	if err != nil {
+		t.Fatalf("Failed to create temporary directory: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	cfg := createTesterConfig()
+	cfg.Countries = append(cfg.Countries, "CH")
+	cfg.AllowLocalRequests = false
+	cfg.LogLocalRequests = false
+	cfg.LogFilePath = tempDir + "/info.log"
+
+	ctx := context.Background()
+	next := http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {})
+
+	handler, err := geoblock.New(ctx, next, cfg, t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req.Header.Add(xForwardedFor, privateRangeIP)
+
+	handler.ServeHTTP(recorder, req)
+
+	assertStatusCode(t, recorder.Result(), http.StatusForbidden)
+
+	content, err := os.ReadFile(cfg.LogFilePath)
+	if err != nil {
+		t.Fatalf("Failed to read log file: %v", err)
+	}
+
+	expected := "request denied [" + privateRangeIP + "] since local IP addresses are denied"
+	if !strings.Contains(string(content), expected) {
+		t.Fatalf("expected denial reason %q in log, got:\n%s", expected, string(content))
+	}
+}
+
 func TestTimeoutOnApiResponse_DenyWhenIgnoreTimeoutFalse(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "logtest")
 	if err != nil {
@@ -1774,6 +1921,64 @@ func waitForFileNonEmpty(t *testing.T, path string, timeout time.Duration) {
 		t.Fatalf("persistence file %q was not created within %s: %v", path, timeout, err)
 	}
 	t.Fatalf("persistence file %q remained empty within %s (size=%d)", path, timeout, fi.Size())
+}
+
+func TestCacheTTLExpiresWithoutForceMonthlyUpdate(t *testing.T) {
+	// cacheTtlSeconds must drive cache refresh on its own, independent of the
+	// legacy forceMonthlyUpdate flag.
+	//
+	// Use a unique middleware name and a dedicated IP so the test is isolated
+	// from any process-wide cache shared by name: it must observe its own
+	// mock's call count, not a cache entry warmed by another test.
+	const ttlTestIP = "203.0.113.7" // TEST-NET-3, not used by other tests
+
+	var apiCalls int32
+	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&apiCalls, 1)
+		rw.WriteHeader(http.StatusOK)
+		_, _ = rw.Write([]byte("CH"))
+	}))
+	defer server.Close()
+
+	cfg := createTesterConfig()
+	cfg.Countries = append(cfg.Countries, "CH")
+	cfg.API = server.URL + "/{ip}"
+	cfg.CacheTTLSeconds = 1
+	cfg.ForceMonthlyUpdate = false
+
+	ctx := context.Background()
+	next := http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {})
+
+	handler, err := geoblock.New(ctx, next, cfg, t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	doRequest := func() {
+		recorder := httptest.NewRecorder()
+		req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost", nil)
+		if reqErr != nil {
+			t.Fatal(reqErr)
+		}
+		req.Header.Add(xForwardedFor, ttlTestIP)
+		handler.ServeHTTP(recorder, req)
+		assertStatusCode(t, recorder.Result(), http.StatusOK)
+	}
+
+	doRequest() // cache miss -> 1 API call
+	doRequest() // within TTL -> served from cache, no new call
+
+	if got := atomic.LoadInt32(&apiCalls); got != 1 {
+		t.Fatalf("expected 1 API call while entry is within TTL, got %d", got)
+	}
+
+	time.Sleep(1200 * time.Millisecond) // exceed the 1s TTL
+
+	doRequest() // entry older than TTL -> refresh -> 2nd API call
+
+	if got := atomic.LoadInt32(&apiCalls); got != 2 {
+		t.Fatalf("expected refresh after TTL expiry (2 API calls), got %d", got)
+	}
 }
 
 func createTesterConfig() *geoblock.Config {
