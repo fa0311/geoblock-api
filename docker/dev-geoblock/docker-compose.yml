@@ -2,6 +2,9 @@ services:
   traefik:
     image: traefik:v3.7.6
 
+    ports:
+      - "80:80"
+
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./../traefik-config/traefik.yml:/etc/traefik/traefik.yml
@@ -13,9 +16,6 @@ services:
     labels:
       - "traefik.http.routers.dash.rule=Host(`dash.localhost`)"
       - "traefik.http.routers.dash.service=api@internal"
-
-    ports:
-      - "80:80"
 
   hello:
     image: traefik/whoami
